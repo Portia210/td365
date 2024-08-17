@@ -1,0 +1,17 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+env/
+venv/
+*.env
+
+# PyCharm project files
+.idea/
+
+# CSV files
+*.csv
+
+# Logs
+*.log
