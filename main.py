@@ -4,7 +4,26 @@ import configparser
 from io import StringIO
 import os
 import glob
+import subprocess
+import sys
 
+
+def get_start_date():
+    while True:
+        start_date_input = input(
+            'Enter the start date (dd/mm/yyyy), "today", "yesterday", or press Enter for all dates: ').lower()
+
+        if start_date_input == "":
+            return None
+        elif start_date_input == "today":
+            return datetime.now().date()
+        elif start_date_input == "yesterday":
+            return datetime.now().date() - timedelta(days=1)
+        else:
+            try:
+                return datetime.strptime(start_date_input, "%d/%m/%Y").date()
+            except ValueError:
+                print("Invalid date format. Please use dd/mm/yyyy or 'today' or 'yesterday'.")
 
 def clean_value(x):
     if isinstance(x, str):
@@ -36,7 +55,7 @@ def get_latest_transaction_history_file(directory):
     return max(files, key=os.path.getmtime)
 
 
-def process_csv(file_path, selected_date):
+def process_csv(file_path):
     # Load and clean the CSV file
     with open(file_path, 'r', encoding="UTF-16") as file:
         data = file.read()
@@ -75,54 +94,103 @@ def process_csv(file_path, selected_date):
     df['Date'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Open Time'])
     df['Date'] = df['Date'].dt.date
 
-    # Filter data based on selected date
-    df = df[df['Date'] == selected_date]
-
     # Sort by 'Close Time'
     df = df.sort_values(by='Close Time')
 
     # Calculate Points and Daily P/L
     df['Points'] = (df['Closing'].astype(float) - df['Opening'].astype(float)).round(1)
-    df['Daily P/L'] = df['P/L'].cumsum().round(1)
-
-    # Reorder columns
-    columns_order = ['Date', 'Open Time', 'Close Time', 'Trade Duration', 'Description', 'Amount', 'Opening', 'Closing',
-                     'Points',
-                     'P/L', 'Daily P/L', 'Balance']
-    df = df[columns_order]
+    df['P/L'] = df['P/L'].astype(float)
 
     return df
 
 
+def analyze_profitability(df, date):
+    # Calculate the winning and losing trade data
+    gain_trades = df[df['P/L'] > 0].groupby('Description')
+    gain_trades_df = pd.DataFrame({
+        'Symbol': gain_trades['P/L'].count().index,
+        'Gain Trades': gain_trades['P/L'].count().values,
+        'Gains': gain_trades['P/L'].sum().values,
+        'Avg Gain': gain_trades['P/L'].mean().values
+    })
+
+    loss_trades = df[df['P/L'] < 0].groupby('Description')
+    loss_trades_df = pd.DataFrame({
+        'Symbol': loss_trades['P/L'].count().index,
+        'Loss Trades': loss_trades['P/L'].count().values,
+        'Losses': loss_trades['P/L'].sum().values,
+        'Avg Loss': loss_trades['P/L'].mean().values
+    })
+
+    # Merge the winning and losing trade DataFrames
+    result_df = pd.merge(gain_trades_df, loss_trades_df, on='Symbol', how='outer')
+    result_df = result_df.fillna(0)
+
+    # Calculate the Profit Ratio, Avg Gain per Contract, and Avg Loss per Contract
+    result_df['Profit Ratio'] = (
+                result_df['Gain Trades'] / (result_df['Gain Trades'] + result_df['Loss Trades'])).round(2)
+    result_df['Avg Gain P.C'] = result_df['Avg Gain'].round(1)
+    result_df['Avg Loss P.C'] = result_df['Avg Loss'].round(1)
+    result_df['Gains'] = result_df['Gains'].round(1)
+    result_df['Losses'] = result_df['Losses'].round(1)
+    result_df['Sum'] = (result_df['Gains'] + result_df['Losses']).round(1)
+
+    # Reorder the columns
+    result_df = result_df[
+        ['Symbol', 'Gain Trades', 'Loss Trades', 'Profit Ratio', 'Avg Gain P.C', 'Avg Loss P.C', 'Gains', 'Losses',
+         'Sum']]
+
+    # Format the date for the output file name
+    output_date = date.strftime("%d-%m-%Y")
+
+    # Export to CSV
+    result_df.to_csv(f"{output_date} trades.csv", index=False)
+
+    print(f"Exported performance data for {output_date}")
+
+
+def delete_csv_files():
+    for file in glob.glob("*.csv"):
+        os.remove(file)
+    print("Deleted existing CSV files.")
+
+
 def main():
+    # Delete existing CSV files
+    delete_csv_files()
+
     # Get the latest TransactionHistory file
     downloads_dir = r"C:\Users\hp\Downloads"
     csv_path = get_latest_transaction_history_file(downloads_dir)
     print(f"Using file: {csv_path}")
 
-    # Get date input
-    date_input = input('Enter the date (dd/mm) or press Enter for today\'s date: ')
-    if date_input:
-        selected_date = datetime.strptime(f"{date_input}/{datetime.now().year}", "%d/%m/%Y").date()
+    # Get start date input
+    start_date = get_start_date()
+
+    if start_date:
+        print(f"Analysis will start from: {start_date}")
     else:
-        selected_date = datetime.now().date()
+        print("Analysis will include all dates")
 
     # Process the CSV file
-    result_df = process_csv(csv_path, selected_date)
+    df = process_csv(csv_path)
 
-    # Format the DataFrame for Excel
-    for col in result_df.columns:
-        if result_df[col].dtype == 'float64':
-            result_df[col] = result_df[col].map('{:.2f}'.format)
+    # Filter data based on start date if provided
+    if start_date:
+        df = df[df['Date'] >= start_date]
 
-    # Format the Date column
-    result_df['Date'] = result_df['Date'].astype(str)
+    # Group by date and analyze profitability for each date
+    for date, group in df.groupby('Date'):
+        analyze_profitability(group, date)
 
-    # Save the result in Excel-friendly format
-    output_path = os.path.join(f'{selected_date}.csv')
-    result_df.to_csv(output_path, index=False, encoding='utf-8-sig')
-
-    print(f"Processing completed. Check '{output_path}' for the result.")
+    print("Processing completed. Check the generated performance CSV files.")
+    # Run the analysis script
+    print("Starting analysis...")
+    try:
+        subprocess.run([sys.executable, "analyze.py"], check=True)
+        print("Analysis completed successfully.")
+    except subprocess.CalledProcessError:
+        print("Error occurred during analysis.")
 
 
 if __name__ == "__main__":
