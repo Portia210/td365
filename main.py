@@ -6,18 +6,19 @@ import os
 import glob
 import subprocess
 import sys
+import numpy as np
 
 
 def get_start_date():
     while True:
         start_date_input = input(
-            'Enter the start date (dd/mm/yyyy), "today", "yesterday", or press Enter for all dates: ').lower()
+            'Enter the start date (dd/mm/yyyy), "today", "yest", or press Enter for all dates: ').lower()
 
         if start_date_input == "":
             return None
         elif start_date_input == "today":
             return datetime.now().date()
-        elif start_date_input == "yesterday":
+        elif start_date_input == "yest":
             return datetime.now().date() - timedelta(days=1)
         else:
             try:
@@ -64,6 +65,7 @@ def process_csv(file_path):
     df = df.apply(lambda col: col.map(clean_value) if col.dtype == 'object' else col)
 
     # Process date and time columns
+    df.rename(columns={"Description": "Symbol"}, inplace=True)
     df[['Date', 'Open Time']] = df['Open Period'].str.split(n=1, expand=True)
     df['Close Time'] = pd.to_datetime(df['Transaction Date'], format='%d/%m/%Y %H:%M:%S').dt.strftime('%H:%M:%S')
     df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%Y')
@@ -77,7 +79,7 @@ def process_csv(file_path):
                            (close_time - open_time).dt.components['seconds'].astype(str).str.zfill(2)
 
     # Reorder and select columns
-    df = df[['Date', 'Open Time', 'Close Time', 'Trade Duration', 'Description', 'Amount', 'Opening', 'Closing', 'P/L',
+    df = df[['Date', 'Open Time', 'Close Time', 'Trade Duration', 'Symbol', 'Amount', 'Opening', 'Closing', 'P/L',
              'Balance']]
 
     # Read the configuration file
@@ -104,48 +106,92 @@ def process_csv(file_path):
     return df
 
 
-def analyze_profitability(df, date):
+def export_processed_trades(df, date):
+    output_date = date.strftime("%d-%m-%Y")
+    df.to_csv(f"{output_date} trades.csv", index=False)
+    print(f"Exported trades data for {output_date}")
+
+
+def analyze_profitability(df):
     # Calculate the winning and losing trade data
-    gain_trades = df[df['P/L'] > 0].groupby('Description')
+    df = df[df["Symbol"]!= "Online Transfer Cash In"]
+    gain_trades_table = df[df['P/L'] > 0]
+    gain_trades_table.loc[:, "Amount"] = np.abs(gain_trades_table["Amount"].values)
+    # print(gain_trades_table.to_string())
+
+    gain_trades = gain_trades_table.groupby('Symbol')
     gain_trades_df = pd.DataFrame({
         'Symbol': gain_trades['P/L'].count().index,
-        'Gain Trades': gain_trades['P/L'].count().values,
+        'Gain Trades': gain_trades['Amount'].sum().values,
         'Gains': gain_trades['P/L'].sum().values,
-        'Avg Gain': gain_trades['P/L'].mean().values
+        'Avg Gain': (gain_trades['P/L'].sum() / gain_trades['Amount'].sum()).values
     })
+    # print(gain_trades_df.to_string())
 
-    loss_trades = df[df['P/L'] < 0].groupby('Description')
+    loss_trades_table = df[df['P/L'] < 0]
+    loss_trades_table.loc[:, "Amount"] = np.abs(loss_trades_table["Amount"].values)
+    loss_trades_table.loc[:, "P/L"] = np.abs(loss_trades_table["P/L"].values)
+    # print(loss_trades_table.to_string())
+    loss_trades = loss_trades_table.groupby('Symbol')
+
     loss_trades_df = pd.DataFrame({
         'Symbol': loss_trades['P/L'].count().index,
-        'Loss Trades': loss_trades['P/L'].count().values,
-        'Losses': loss_trades['P/L'].sum().values,
-        'Avg Loss': loss_trades['P/L'].mean().values
+        # 'Loss Trades': np.abs(loss_trades['Amount'].sum().values),
+        'Loss Trades': loss_trades['Amount'].sum().values,
+        'Losses': np.abs(loss_trades['P/L'].sum().values),  # Use np.abs() for losses
+        'Avg Loss': np.abs((loss_trades['P/L'].sum() / loss_trades['Amount'].sum())).values
     })
+    # print(loss_trades_df.to_string())
 
     # Merge the winning and losing trade DataFrames
     result_df = pd.merge(gain_trades_df, loss_trades_df, on='Symbol', how='outer')
     result_df = result_df.fillna(0)
 
-    # Calculate the Profit Ratio, Avg Gain per Contract, and Avg Loss per Contract
-    result_df['Profit Ratio'] = (
-                result_df['Gain Trades'] / (result_df['Gain Trades'] + result_df['Loss Trades'])).round(2)
-    result_df['Avg Gain P.C'] = result_df['Avg Gain'].round(1)
-    result_df['Avg Loss P.C'] = result_df['Avg Loss'].round(1)
+    # Ensure Gain Trades and Loss Trades are non-negative integers
+    result_df['Gain Trades'] = result_df['Gain Trades'].astype(int)
+    result_df['Loss Trades'] = result_df['Loss Trades'].astype(int)
+
+    # Calculate Profit % and Loss %
+    total_trades = result_df['Gain Trades'] + result_df['Loss Trades']
+    result_df['Profit %'] = (result_df['Gain Trades'] / total_trades * 100).round(1)
+    result_df['Loss %'] = (result_df['Loss Trades'] / total_trades * 100).round(1)
+
+    # Ensure Avg Gain and Avg Loss are positive
+    result_df['Avg Gain P.C'] = np.abs(result_df['Avg Gain']).round(1)
+    result_df['Avg Loss P.C'] = np.abs(result_df['Avg Loss']).round(1)
+
     result_df['Gains'] = result_df['Gains'].round(1)
     result_df['Losses'] = result_df['Losses'].round(1)
-    result_df['Sum'] = (result_df['Gains'] + result_df['Losses']).round(1)
+    result_df['Sum'] = (result_df['Gains'] - result_df['Losses']).round(1)
+
+    # Calculate Total row
+    total = pd.DataFrame({
+        'Symbol': ['Total'],
+        'Gain Trades': [result_df['Gain Trades'].sum()],
+        'Loss Trades': [result_df['Loss Trades'].sum()],
+        'Gains': [result_df['Gains'].sum().round(1)],
+        'Losses': [result_df['Losses'].sum().round(1)],
+        'Sum': [result_df['Sum'].sum().round(1)]
+    })
+
+    # Calculate Profit %, Loss %, Avg Gain P.C, and Avg Loss P.C for Total
+    total_contracts = total['Gain Trades'].values[0] + total['Loss Trades'].values[0]
+    total['Profit %'] = (total['Gain Trades'] / total_contracts * 100).round(2)
+    total['Loss %'] = (total['Loss Trades'] / total_contracts * 100).round(2)
+    total['Avg Gain'] = (total['Gains'] / total['Gain Trades']).round(1)
+    total['Avg Loss'] = (total['Losses'] / total['Loss Trades']).round(1)
+
+    # Append Total row to result_df
+    result_df = pd.concat([result_df, total], ignore_index=True)
 
     # Reorder the columns
-    result_df = result_df[
-        ['Symbol', 'Gain Trades', 'Loss Trades', 'Profit Ratio', 'Avg Gain P.C', 'Avg Loss P.C', 'Gains', 'Losses',
-         'Sum']]
+    result_df = result_df[['Symbol', 'Gain Trades', 'Loss Trades', 'Profit %', 'Loss %', 'Avg Gain', 'Avg Loss', 'Gains', 'Losses', 'Sum']]
+    print(result_df.to_string())
+    return result_df
 
-    # Format the date for the output file name
+def export_performance(result_df, date):
     output_date = date.strftime("%d-%m-%Y")
-
-    # Export to CSV
-    result_df.to_csv(f"{output_date} trades.csv", index=False)
-
+    result_df.to_csv(f"{output_date} performance.csv", index=False)
     print(f"Exported performance data for {output_date}")
 
 
@@ -181,16 +227,16 @@ def main():
 
     # Group by date and analyze profitability for each date
     for date, group in df.groupby('Date'):
-        analyze_profitability(group, date)
+        # Export processed trades
+        export_processed_trades(group, date)
 
-    print("Processing completed. Check the generated performance CSV files.")
-    # Run the analysis script
-    print("Starting analysis...")
-    try:
-        subprocess.run([sys.executable, "analyze.py"], check=True)
-        print("Analysis completed successfully.")
-    except subprocess.CalledProcessError:
-        print("Error occurred during analysis.")
+        # Analyze profitability
+        performance_df = analyze_profitability(group)
+
+        # Export performance analysis
+        export_performance(performance_df, date)
+
+    print("Processing completed. Check the generated trades and performance CSV files.")
 
 
 if __name__ == "__main__":
