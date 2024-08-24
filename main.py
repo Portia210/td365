@@ -113,81 +113,95 @@ def export_processed_trades(df, date):
 
 
 def analyze_profitability(df):
-    # Calculate the winning and losing trade data
-    df = df[df["Symbol"]!= "Online Transfer Cash In"]
+    # Filter out irrelevant entries
+    df = df[df["Symbol"] != "Online Transfer Cash In"]
+
+    # Calculate Gain Trades
     gain_trades_table = df[df['P/L'] > 0]
     gain_trades_table.loc[:, "Amount"] = np.abs(gain_trades_table["Amount"].values)
-    # print(gain_trades_table.to_string())
-
     gain_trades = gain_trades_table.groupby('Symbol')
     gain_trades_df = pd.DataFrame({
         'Symbol': gain_trades['P/L'].count().index,
         'Gain Trades': gain_trades['Amount'].sum().values,
         'Gains': gain_trades['P/L'].sum().values,
-        'Avg Gain': (gain_trades['P/L'].sum() / gain_trades['Amount'].sum()).values
     })
-    # print(gain_trades_df.to_string())
+    gain_trades_df['Avg Gain'] = gain_trades_df.apply(
+        lambda row: round(row['Gains'] / row['Gain Trades'], 1) if row['Gain Trades'] > 0 else 0, axis=1
+    )
 
+    # Calculate Loss Trades
     loss_trades_table = df[df['P/L'] < 0]
     loss_trades_table.loc[:, "Amount"] = np.abs(loss_trades_table["Amount"].values)
     loss_trades_table.loc[:, "P/L"] = np.abs(loss_trades_table["P/L"].values)
-    # print(loss_trades_table.to_string())
     loss_trades = loss_trades_table.groupby('Symbol')
-
     loss_trades_df = pd.DataFrame({
         'Symbol': loss_trades['P/L'].count().index,
-        # 'Loss Trades': np.abs(loss_trades['Amount'].sum().values),
         'Loss Trades': loss_trades['Amount'].sum().values,
-        'Losses': np.abs(loss_trades['P/L'].sum().values),  # Use np.abs() for losses
-        'Avg Loss': np.abs((loss_trades['P/L'].sum() / loss_trades['Amount'].sum())).values
+        'Losses': -loss_trades['P/L'].sum().values,
     })
-    # print(loss_trades_df.to_string())
+    loss_trades_df['Avg Loss'] = loss_trades_df.apply(
+        lambda row: round(row['Losses'] / row['Loss Trades'], 1) if row['Loss Trades'] > 0 else 0, axis=1
+    )
 
-    # Merge the winning and losing trade DataFrames
+    # Calculate Breakeven Trades
+    breakeven_trades_table = df[(df['P/L'] >= -2) & (df['P/L'] <= 2)]  # Assuming -2 < P/L < 2 is the breakeven range
+    breakeven_trades = breakeven_trades_table.groupby('Symbol')
+    breakeven_trades_df = pd.DataFrame({
+        'Symbol': breakeven_trades['P/L'].count().index,
+        'Breakeven Trades': breakeven_trades['Amount'].count().values,
+        'Breakeven': breakeven_trades['P/L'].sum().values
+    })
+    breakeven_trades_df['Avg Breakeven'] = breakeven_trades_df.apply(
+        lambda row: round(row['Breakeven'] / row['Breakeven Trades'], 1) if row['Breakeven Trades'] > 0 else 0, axis=1
+    )
+
+    # Merge all DataFrames
     result_df = pd.merge(gain_trades_df, loss_trades_df, on='Symbol', how='outer')
+    result_df = pd.merge(result_df, breakeven_trades_df, on='Symbol', how='outer')
     result_df = result_df.fillna(0)
 
-    # Ensure Gain Trades and Loss Trades are non-negative integers
-    result_df['Gain Trades'] = result_df['Gain Trades'].astype(int)
-    result_df['Loss Trades'] = result_df['Loss Trades'].astype(int)
-
-    # Calculate Profit % and Loss %
-    total_trades = result_df['Gain Trades'] + result_df['Loss Trades']
+    # Calculate percentages
+    total_trades = result_df['Gain Trades'] + result_df['Loss Trades'] + result_df['Breakeven Trades']
     result_df['Profit %'] = (result_df['Gain Trades'] / total_trades * 100).round(1)
     result_df['Loss %'] = (result_df['Loss Trades'] / total_trades * 100).round(1)
+    result_df['Breakeven %'] = (result_df['Breakeven Trades'] / total_trades * 100).round(1)
 
-    # Ensure Avg Gain and Avg Loss are positive
-    result_df['Avg Gain P.C'] = np.abs(result_df['Avg Gain']).round(1)
-    result_df['Avg Loss P.C'] = np.abs(result_df['Avg Loss']).round(1)
-
-    result_df['Gains'] = result_df['Gains'].round(1)
-    result_df['Losses'] = result_df['Losses'].round(1)
-    result_df['Sum'] = (result_df['Gains'] - result_df['Losses']).round(1)
+    # Calculate the overall sum
+    result_df['Sum'] = (result_df['Gains'] + result_df['Losses'] + result_df['Breakeven']).round(1)
 
     # Calculate Total row
     total = pd.DataFrame({
         'Symbol': ['Total'],
         'Gain Trades': [result_df['Gain Trades'].sum()],
         'Loss Trades': [result_df['Loss Trades'].sum()],
+        'Breakeven Trades': [result_df['Breakeven Trades'].sum()],
         'Gains': [result_df['Gains'].sum().round(1)],
         'Losses': [result_df['Losses'].sum().round(1)],
+        'Breakeven': [result_df['Breakeven'].sum().round(1)],
         'Sum': [result_df['Sum'].sum().round(1)]
     })
 
-    # Calculate Profit %, Loss %, Avg Gain P.C, and Avg Loss P.C for Total
-    total_contracts = total['Gain Trades'].values[0] + total['Loss Trades'].values[0]
-    total['Profit %'] = (total['Gain Trades'] / total_contracts * 100).round(2)
-    total['Loss %'] = (total['Loss Trades'] / total_contracts * 100).round(2)
-    total['Avg Gain'] = (total['Gains'] / total['Gain Trades']).round(1)
-    total['Avg Loss'] = (total['Losses'] / total['Loss Trades']).round(1)
+    total_contracts = total['Gain Trades'].values[0] + total['Loss Trades'].values[0] + \
+                      total['Breakeven Trades'].values[0]
+    total['Profit %'] = round(total['Gain Trades'] / total_contracts * 100, 1) if total_contracts > 0 else 0
+    total['Loss %'] = round(total['Loss Trades'] / total_contracts * 100, 1) if total_contracts > 0 else 0
+    total['Breakeven %'] = round(total['Breakeven Trades'] / total_contracts * 100, 1) if total_contracts > 0 else 0
+    total['Avg Gain'] = round(total['Gains'] / total['Gain Trades'], 1) if total['Gain Trades'].values[0] > 0 else 0
+    total['Avg Loss'] = round(total['Losses'] / total['Loss Trades'], 1) if total['Loss Trades'].values[0] > 0 else 0
+    total['Avg Breakeven'] = round(total['Breakeven'] / total['Breakeven Trades'], 1) if \
+    total['Breakeven Trades'].values[0] > 0 else 0
 
     # Append Total row to result_df
     result_df = pd.concat([result_df, total], ignore_index=True)
 
     # Reorder the columns
-    result_df = result_df[['Symbol', 'Gain Trades', 'Loss Trades', 'Profit %', 'Loss %', 'Avg Gain', 'Avg Loss', 'Gains', 'Losses', 'Sum']]
+    result_df = result_df[
+        ['Symbol', 'Gain Trades', 'Loss Trades', 'Breakeven Trades', 'Profit %', 'Loss %', 'Breakeven %', 'Avg Gain',
+         'Avg Loss', 'Avg Breakeven', 'Gains', 'Losses', 'Breakeven', 'Sum']]
+
     print(result_df.to_string())
     return result_df
+
 
 def export_performance(result_df, date):
     output_date = date.strftime("%d-%m-%Y")
